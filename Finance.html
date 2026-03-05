@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<link rel="manifest" href="manifest.json>
+<meta name="theme-color" content="#061b2b">
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>FlowMoney — Fixed & Improved</title>
+<style>
+  :root{
+    --bg:#071322; --panel:#0b1220; --accent:#06b6d4; --muted:#9aa7b2; --card:#0f1728;
+  }
+  *{box-sizing:border-box}
+  body{margin:0; font-family:Inter,system-ui,Segoe UI,Roboto; background:linear-gradient(180deg,#071322,#041021); color:#e6eef3; height:100vh; display:flex; flex-direction:column;}
+  .topbar{padding:10px; display:flex; gap:8px; align-items:center; background:linear-gradient(180deg, rgba(255,255,255,0.02), transparent);}
+  button{background:transparent; border:1px solid rgba(255,255,255,0.06); color:var(--muted); padding:8px 12px; border-radius:8px; cursor:pointer;}
+  button.primary{border-color:var(--accent); color:var(--accent); box-shadow:0 6px 18px rgba(6,182,212,0.06);}
+  #canvasWrap{flex:1; position:relative; overflow:hidden;}
+  #canvas{position:relative; width:100%; height:100%;}
+  .wallet{
+    position:absolute;
+    background:#0e2633;
+    padding:10px 12px;
+    border-radius:12px;
+    min-width:140px;
+    box-shadow:0 8px 20px rgba(2,12,20,0.6);
+    transition:box-shadow .12s ease;
+    touch-action:none;
+    user-select:none;
+    -webkit-user-select:none;
+  }
+  .wallet:active{box-shadow:0 12px 30px rgba(2,12,20,0.8)}
+  .wallet b{display:block; font-size:14px; color:#cfeff6}
+  .wallet .bal{font-size:13px; color:#bfeee8; margin-top:6px}
+  /* modal */
+  .modal-backdrop{position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; align-items:center; justify-content:center; z-index:30;}
+  .modal{background:#071825; padding:16px; border-radius:10px; width:94%; max-width:720px; color:#dff6fb; position:relative; max-height:85vh; overflow:auto;}
+  .close{position:absolute; right:12px; top:10px; cursor:pointer; font-size:18px; color:var(--muted)}
+  .field{display:flex; flex-direction:column; gap:6px; margin-bottom:8px;}
+  input,select,textarea{background:#02121a;border:1px solid rgba(255,255,255,0.03); color:#cbeef6; padding:8px; border-radius:6px; width:100%;}
+  textarea{min-height:80px; resize:vertical;}
+  table{width:100%; border-collapse:collapse; table-layout:fixed;}
+  th,td{padding:8px; text-align:left; font-size:14px; border-bottom:1px solid rgba(255,255,255,0.03);}
+  thead th{color:var(--accent); font-weight:600;}
+  /* prevent date wrapping */
+  td.dateCell, th.dateCell{white-space:nowrap; width:120px;}
+  td.changeCell, th.changeCell{width:90px; white-space:nowrap;}
+  td.noteCell{overflow:hidden; text-overflow:ellipsis; word-break:break-word; max-width:400px;}
+  .tx-scroll{max-height:420px; overflow:auto; padding-right:6px;}
+  .small{font-size:13px; color:var(--muted)}
+  .danger{background:#5a1b1f; color:white;}
+  .controls{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;}
+  .hint{font-size:13px; color:var(--muted);}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <button id="btnNewWallet" class="primary">➕ Tạo ví</button>
+  <button id="btnNewTx">🔁 Giao dịch mới</button>
+  <button id="btnSaveFile">💾 Tải JSON</button>
+  <button id="btnLoadFile">📂 Mở JSON</button>
+  <input id="fileInput" type="file" accept="application/json" style="display:none"/>
+  <div style="margin-left:auto; font-size:13px; color:var(--muted)">FlowMoney — cá nhân · lưu local</div>
+</div>
+
+<div id="canvasWrap">
+  <div id="canvas"></div>
+</div>
+
+<!-- Modals -->
+<div id="modalRoot" class="modal-backdrop">
+  <div id="modalContent" class="modal">
+    <!-- content injected -->
+  </div>
+</div>
+
+<script>
+/* App state */
+const STORAGE_KEY = 'flowmoney_v3_state';
+let state = { wallets: [], transactions: [], nextId: 1 };
+
+/* Helpers */
+function uid(){ return state.nextId++; }
+function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+function loadState(){
+  const s = localStorage.getItem(STORAGE_KEY);
+  if(s){
+    try{ state = JSON.parse(s);
+      if(!state.nextId) state.nextId = Math.max(1, ...(state.wallets.map(w=>w.id)||[]), ...(state.transactions.map(t=>t.id)||[])) + 1;
+    }catch(e){ console.error(e); }
+  }
+}
+function fmt(n){ return (Math.round((parseFloat(n)||0)*100)/100).toLocaleString(); }
+
+/* DOM refs */
+const canvas = document.getElementById('canvas');
+const modalRoot = document.getElementById('modalRoot');
+const modalContent = document.getElementById('modalContent');
+
+/* File load/save */
+document.getElementById('btnSaveFile').addEventListener('click', ()=>{
+  const blob = new Blob([JSON.stringify(state, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'flowmoney_v3.json'; a.click(); URL.revokeObjectURL(url);
+});
+document.getElementById('btnLoadFile').addEventListener('click', ()=>document.getElementById('fileInput').click());
+document.getElementById('fileInput').addEventListener('change', (ev)=>{
+  const f = ev.target.files[0];
+  if(!f) return;
+  const fr = new FileReader();
+  fr.onload = (e)=>{
+    try{
+      const data = JSON.parse(e.target.result);
+      if(Array.isArray(data.wallets) && Array.isArray(data.transactions)){
+        state = data;
+        if(!state.nextId) state.nextId = Math.max(1, ...(state.wallets.map(w=>w.id)||[]), ...(state.transactions.map(t=>t.id)||[])) + 1;
+        saveState(); renderAll();
+        closeModal();
+      } else alert('File JSON không hợp lệ');
+    }catch(err){ alert('Không đọc được file: ' + err); }
+  };
+  fr.readAsText(f);
+});
+
+/* Modal helpers */
+function openModal(html){
+  modalContent.innerHTML = html;
+  modalRoot.style.display = 'flex';
+}
+function closeModal(){
+  modalRoot.style.display = 'none';
+  modalContent.innerHTML = '';
+}
+modalRoot.addEventListener('click', (e)=>{ if(e.target === modalRoot) closeModal(); });
+
+/* Render */
+function renderAll(){
+  canvas.innerHTML = '';
+  // render wallets
+  state.wallets.forEach(w => renderWallet(w));
+}
+
+/* Render single wallet element */
+function renderWallet(w){
+  let el = document.createElement('div');
+  el.className = 'wallet';
+  el.dataset.id = w.id;
+  el.style.left = (w.x || 60) + 'px';
+  el.style.top = (w.y || 60) + 'px';
+  el.innerHTML = `<b>${escapeHtml(w.name)}</b><div class="bal">₫${fmt(w.balance)}</div>`;
+
+  // attach pointer handlers for long-press drag + click open detail
+  attachLongPressDrag(el, w);
+
+  // append
+  canvas.appendChild(el);
+}
+
+/* Attach long-press (1s) then dragging with rAF for smoothness; short click opens detail modal */
+function attachLongPressDrag(el, wallet){
+  let pressTimer = null;
+  let dragging = false;
+  let pointerId = null;
+  let startX=0, startY=0, startLeft=0, startTop=0;
+  let pendingX=0, pendingY=0;
+  let raf = null;
+
+  const onPointerDown = (ev)=>{
+    ev.preventDefault();
+    pointerId = ev.pointerId;
+    el.setPointerCapture(pointerId);
+    startX = ev.clientX;
+    startY = ev.clientY;
+    startLeft = wallet.x || 60;
+    startTop = wallet.y || 60;
+    // start long press timer
+    pressTimer = setTimeout(()=>{
+      dragging = true;
+      el.style.transition = 'none';
+      // hint style
+      el.style.boxShadow = '0 14px 36px rgba(0,0,0,0.6)';
+    }, 1000);
+  };
+
+  const onPointerMove = (ev)=>{
+    if(!dragging) return;
+    pendingX = startLeft + (ev.clientX - startX);
+    pendingY = startTop + (ev.clientY - startY);
+    if(!raf){
+      raf = requestAnimationFrame(()=>{ raf = null; applyMove(); });
+    }
+  };
+
+  const applyMove = ()=>{
+    // apply to DOM for smoothness
+    el.style.left = pendingX + 'px';
+    el.style.top = pendingY + 'px';
+  };
+
+  const endPress = (ev)=>{
+    clearTimeout(pressTimer); pressTimer = null;
+    try{ if(pointerId!==null) el.releasePointerCapture(pointerId); }catch(e){}
+    pointerId = null;
+    if(dragging){
+      // finalize position to wallet state
+      dragging = false;
+      el.style.boxShadow = '';
+      wallet.x = parseFloat(el.style.left);
+      wallet.y = parseFloat(el.style.top);
+      el.style.transition = ''; // restore
+      saveState();
+    } else {
+      // short click -> open detail
+      openWalletDetail(wallet.id);
+    }
+  };
+
+  el.addEventListener('pointerdown', onPointerDown);
+  el.addEventListener('pointermove', onPointerMove);
+  el.addEventListener('pointerup', endPress);
+  el.addEventListener('pointercancel', endPress);
+  el.addEventListener('pointerleave', (ev)=>{
+    if(pressTimer){ clearTimeout(pressTimer); pressTimer = null; }
+  });
+}
+
+/* UI: New wallet modal */
+document.getElementById('btnNewWallet').addEventListener('click', ()=>{
+  openModal(`
+    <div style="display:flex; align-items:center; gap:8px;">
+      <h3>Tạo Wallet</h3>
+      <div class="close" onclick="closeModal()">❌</div>
+    </div>
+    <div class="field"><label>Tên ví</label><input id="i_w_name" placeholder="Ví tiền, Ngân hàng..." /></div>
+    <div class="field"><label>Số dư ban đầu</label><input id="i_w_balance" type="number" value="0" /></div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:8px;">
+      <button onclick="closeModal()">Hủy</button>
+      <button class="primary" id="createWalletBtn">Tạo</button>
+    </div>
+  `);
+  // set handlers after open
+  setTimeout(()=>{
+    document.getElementById('i_w_name').value = '';
+    document.getElementById('i_w_balance').value = '0';
+    document.getElementById('createWalletBtn').addEventListener('click', ()=>{
+      const name = document.getElementById('i_w_name').value.trim();
+      const balance = parseFloat(document.getElementById('i_w_balance').value) || 0;
+      if(!name){ alert('Nhập tên ví'); return; }
+      const id = uid();
+      state.wallets.push({ id, name, balance, x: 40 + Math.random()*200, y: 40 + Math.random()*200 });
+      saveState(); renderAll(); closeModal();
+    });
+  },0);
+});
+
+/* UI: New transaction modal */
+document.getElementById('btnNewTx').addEventListener('click', ()=> openNewTxModal());
+function openNewTxModal(){
+  if(state.wallets.length < 1){ alert('Vui lòng tạo ít nhất 1 ví trước'); return; }
+  const opts = state.wallets.map(w=>`<option value="${w.id}">${escapeHtml(w.name)} (₫${fmt(w.balance)})</option>`).join('');
+  openModal(`
+    <div style="display:flex; align-items:center; gap:8px;">
+      <h3>Tạo giao dịch</h3>
+      <div class="close" onclick="closeModal()">❌</div>
+    </div>
+    <div class="field"><label>Ngày</label><input id="i_t_date" type="date" value="${(new Date()).toISOString().slice(0,10)}"/></div>
+    <div class="field"><label>From (chuyển)</label><select id="i_from">${opts}</select></div>
+    <div class="field"><label>To (nhận)</label><select id="i_to">${opts}</select></div>
+    <div class="field"><label>Số tiền</label><input id="i_amount" type="number" /></div>
+    <div class="field"><label>Ghi chú</label><textarea id="i_note"></textarea></div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:8px;">
+      <button onclick="closeModal()">Hủy</button>
+      <button class="primary" id="createTxBtn">Hoàn thành</button>
+    </div>
+  `);
+
+  // after modal shown, clear fields
+  setTimeout(()=>{
+    document.getElementById('i_amount').value = '';
+    document.getElementById('i_note').value = '';
+    document.getElementById('createTxBtn').addEventListener('click', ()=> {
+      const fromId = parseInt(document.getElementById('i_from').value);
+      const toId = parseInt(document.getElementById('i_to').value);
+      const amount = parseFloat(document.getElementById('i_amount').value);
+      const date = document.getElementById('i_t_date').value || (new Date()).toISOString().slice(0,10);
+      const note = document.getElementById('i_note').value || '';
+      if(isNaN(amount) || amount <= 0){ alert('Nhập số tiền hợp lệ'); return; }
+      const fromW = state.wallets.find(w=>w.id === fromId);
+      const toW = state.wallets.find(w=>w.id === toId);
+      if(!fromW || !toW){ alert('Ví không tồn tại'); return; }
+      // create tx (global)
+      const id = uid();
+      const tx = { id, date, from: fromId, to: toId, amount: amount, note };
+      state.transactions.unshift(tx); // newest first
+      // update balances
+      fromW.balance = (parseFloat(fromW.balance)||0) - amount;
+      toW.balance = (parseFloat(toW.balance)||0) + amount;
+      saveState(); renderAll(); closeModal();
+    });
+  },0);
+}
+
+/* Open wallet detail modal (transactions list) */
+function openWalletDetail(walletId){
+  const w = state.wallets.find(x=>x.id === walletId);
+  if(!w) return;
+  // get related transactions (newest first)
+  const txs = state.transactions.filter(t => t.from === walletId || t.to === walletId);
+  const rows = txs.map((t, idx) => {
+    const sign = (t.to === walletId) ? '+' : '-';
+    const change = (sign === '+') ? `+${fmt(t.amount)}` : `-${fmt(t.amount)}`;
+    // include a data-id on delete button
+    return `<tr data-id="${t.id}">
+      <td class="dateCell">${escapeHtml(t.date)}</td>
+      <td class="changeCell">${change}</td>
+      <td class="noteCell">${escapeHtml(t.note)}</td>
+      <td style="width:110px; text-align:right"><button data-id="${t.id}" class="delTx">Xóa</button></td>
+    </tr>`;
+  }).join('');
+
+  openModal(`
+    <div style="display:flex; align-items:center; gap:8px;">
+      <h3>Lịch sử: ${escapeHtml(w.name)} &nbsp; (<span class="small">₫${fmt(w.balance)}</span>)</h3>
+      <div style="margin-left:auto; display:flex; gap:8px;">
+        <button id="copyCsvBtn">Copy CSV</button>
+        <button id="downloadCsvBtn">Download CSV</button>
+      </div>
+      <div class="close" onclick="closeModal()">❌</div>
+    </div>
+
+    <div class="tx-scroll" id="txScroll">
+      <table>
+        <thead><tr><th class="dateCell">Ngày</th><th class="changeCell">Biến động</th><th>Ghi chú</th><th style="width:110px"></th></tr></thead>
+        <tbody id="txBody">${rows || '<tr><td colspan="4" class="small">Chưa có giao dịch</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:8px;">
+      <button onclick="closeModal()">Đóng</button>
+      <button class="danger" id="deleteWalletBtn">Xóa ví</button>
+    </div>
+  `);
+
+  // after modal rendered: attach delete tx handlers + csv handlers + delete wallet
+  setTimeout(()=>{
+    // delete single tx: revert balances and remove tx
+    document.querySelectorAll('.delTx').forEach(btn=>{
+      btn.addEventListener('click', (ev)=>{
+        const id = parseInt(btn.dataset.id);
+        if(!confirm('Xác nhận xóa giao dịch? Hệ thống sẽ điều chỉnh lại số dư.')) return;
+        const tx = state.transactions.find(t=>t.id === id);
+        if(tx){
+          const fromW = state.wallets.find(x=>x.id === tx.from);
+          const toW = state.wallets.find(x=>x.id === tx.to);
+          const am = parseFloat(tx.amount)||0;
+          if(fromW) fromW.balance = (parseFloat(fromW.balance)||0) + am;
+          if(toW) toW.balance = (parseFloat(toW.balance)||0) - am;
+        }
+        state.transactions = state.transactions.filter(t=>t.id !== id);
+        saveState(); renderAll(); // refresh list by re-opening modal
+        // re-open to reflect change
+        setTimeout(()=> openWalletDetail(walletId), 60);
+      });
+    });
+
+    // delete wallet
+    document.getElementById('deleteWalletBtn').addEventListener('click', ()=>{
+      if(!confirm('Xác nhận xóa ví này? Mọi giao dịch liên quan sẽ bị xóa và không thể hoàn tác.')) return;
+      // remove wallet
+      state.wallets = state.wallets.filter(x=>x.id !== walletId);
+      // remove related transactions
+      state.transactions = state.transactions.filter(t=> t.from !== walletId && t.to !== walletId);
+      saveState(); renderAll(); closeModal();
+    });
+
+    // CSV copy/download
+    document.getElementById('copyCsvBtn').addEventListener('click', ()=>{
+      // build CSV header and rows (Date,From,To,Amount,Note)
+      const related = state.transactions.filter(t => t.from === walletId || t.to === walletId);
+      if(related.length === 0){ alert('Không có giao dịch để copy'); return; }
+      const header = ['Ngày','From','To','Số tiền','Ghi chú'];
+      const rows = related.map(t=>{
+        const fromName = (state.wallets.find(w=>w.id===t.from)||{name:'-' }).name;
+        const toName = (state.wallets.find(w=>w.id===t.to)||{name:'-' }).name;
+        // escape quotes
+        const note = (t.note||'').replace(/"/g,'""');
+        return [`"${t.date}"`, `"${escapeCsv(fromName)}"`, `"${escapeCsv(toName)}"`, `${t.amount}`, `"${escapeCsv(note)}"`].join(',');
+      });
+      const csv = [header.join(','), ...rows].join('\\n');
+      // copy to clipboard
+      navigator.clipboard.writeText(csv).then(()=>{
+        alert('Đã copy CSV vào clipboard — bạn có thể paste vào Excel.');
+      }).catch(err=>{
+        // fallback: create temporary textarea
+        const ta = document.createElement('textarea');
+        ta.value = csv; document.body.appendChild(ta); ta.select();
+        try{ document.execCommand('copy'); alert('Đã copy CSV (fallback).'); }catch(e){ alert('Không thể copy: '+e); }
+        ta.remove();
+      });
+    });
+
+    document.getElementById('downloadCsvBtn').addEventListener('click', ()=>{
+      const related = state.transactions.filter(t => t.from === walletId || t.to === walletId);
+      if(related.length === 0){ alert('Không có giao dịch để tải'); return; }
+      const header = ['Ngày','From','To','Số tiền','Ghi chú'];
+      const rows = related.map(t=>{
+        const fromName = (state.wallets.find(w=>w.id===t.from)||{name:'-' }).name;
+        const toName = (state.wallets.find(w=>w.id===t.to)||{name:'-' }).name;
+        const note = (t.note||'').replace(/"/g,'""');
+        return [`"${t.date}"`, `"${escapeCsv(fromName)}"`, `"${escapeCsv(toName)}"`, `${t.amount}`, `"${escapeCsv(note)}"`].join(',');
+      });
+      const csv = [header.join(','), ...rows].join('\\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `${sanitizeFilename(w.name)}_transactions.csv`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    });
+
+    // scroll to top so newest visible
+    const txScroll = document.getElementById('txScroll'); if(txScroll) txScroll.scrollTop = 0;
+  }, 0);
+}
+
+/* Utility helpers */
+function escapeHtml(s=''){ return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+function escapeCsv(s=''){ return String(s).replaceAll('"','""'); }
+function sanitizeFilename(s='file'){ return s.replace(/[^a-z0-9_\-\.]/ig,'_'); }
+
+/* initial load */
+loadState(); renderAll();
+
+/* expose closeModal for inline onclick */
+window.closeModal = closeModal;
+
+/* Expose renderAll for re-open flows */
+window.renderAll = renderAll;
+
+/* Expose openWalletDetail for click handlers */
+window.openWalletDetail = openWalletDetail;
+</script>
+</body>
+</html>
